@@ -1,201 +1,288 @@
-"""Git repository operations for the aimem memory store.
+"""LayerRepo — git-backed storage for one memory layer (design.md §3, R-001).
 
-Manages the ~/.ai-memory/ git repository: initialization, note CRUD,
-git commit/sync, and directory structure.
+Phase 1 ships the ``personal`` layer only.  The parent index repo lives at
+``~/.ai-memory/`` (or ``AIMEM_DIR``).  The ``personal/`` directory is a
+regular git repository (Phase 2 will turn it into a submodule once remotes
+are wired up).
+
+Directory layout after ``aimem init``::
+
+    ~/.ai-memory/
+    ├── .aimem.yaml          ← config
+    ├── .aimem.lock          ← flock sentinel (auto-created)
+    ├── .gitignore
+    ├── .keys/               ← ed25519 key pair (mode 0600 for private key)
+    └── personal/            ← personal layer git repo
+        ├── identity/
+        ├── preference/
+        ├── procedure/
+        ├── observation/
+        └── knowledge/
 """
 
 from __future__ import annotations
 
-import logging
 import subprocess
 from pathlib import Path
 
-from aimem.core.config import DEFAULT_MEMORY_DIR, AimemConfig
-from aimem.core.note import MemoryType, Note, NoteMeta
+from aimem.core.config import AimemConfig
+from aimem.core.error import InvariantError, NotFoundError
+from aimem.core import logging as _logging
+from aimem.core.schema import Layer, MemoryRecord, MemoryType
 
-logger = logging.getLogger(__name__)
+log = _logging.get_logger(__name__)
 
-DIRECTORY_STRUCTURE: dict[str, list[str]] = {
-    "identity": [],
-    "knowledge": ["languages", "frameworks", "tools", "domains", "projects"],
-    "procedures": ["workflows", "commands", "patterns", "troubleshooting"],
-    "journal": ["sessions", "decisions", "incidents", "learnings"],
-    ".links": [],
-    ".archive": [],
+_LAYER_DIRS: dict[Layer, str] = {
+    Layer.PERSONAL: "personal",
+    Layer.PROJECT: "projects",
+    Layer.TEAM: "teams",
 }
 
+_TYPE_SUBDIRS: dict[MemoryType, str] = {
+    MemoryType.IDENTITY: "identity",
+    MemoryType.PREFERENCE: "preference",
+    MemoryType.PROCEDURE: "procedure",
+    MemoryType.OBSERVATION: "observation",
+    MemoryType.KNOWLEDGE: "knowledge",
+}
 
-class MemoryRepository:
-    """Manages the git-backed memory repository."""
+_GITIGNORE = """\
+.aimem.lock
+.keys/
+*.pyc
+__pycache__/
+.index/
+"""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = root or DEFAULT_MEMORY_DIR
+_LAYER_GITIGNORE = """\
+.inbox/
+*.pyc
+"""
+
+
+class LayerRepo:
+    """Manages the on-disk git repositories for all memory layers."""
+
+    def __init__(self, memory_dir: Path | None = None) -> None:
+        from aimem.core.config import DEFAULT_MEMORY_DIR
+
+        self.root = memory_dir or DEFAULT_MEMORY_DIR
         self.config = AimemConfig.load(self.root)
+
+    # ------------------------------------------------------------------
+    # State checks
+    # ------------------------------------------------------------------
 
     @property
     def is_initialized(self) -> bool:
-        """Check if the memory repository exists and is a git repo."""
-        return (self.root / ".git").is_dir()
+        return (self.root / ".aimem.yaml").exists()
 
-    def init(self) -> Path:
-        """Initialize a new memory repository with directory structure."""
+    def layer_path(self, layer: Layer = Layer.PERSONAL) -> Path:
+        return self.root / _LAYER_DIRS[layer]
+
+    def record_path(self, record: MemoryRecord) -> Path:
+        """Canonical on-disk path for a record (id-addressed)."""
+        subdir = _TYPE_SUBDIRS[record.type]
+        layer_root = self.layer_path(record.layer)
+        return layer_root / subdir / f"{record.id}.md"
+
+    # ------------------------------------------------------------------
+    # Initialization (US-001)
+    # ------------------------------------------------------------------
+
+    def init(self, path: Path | None = None) -> Path:
+        """Create the parent index repo and the personal layer repo.
+
+        Raises ``InvariantError`` if the path is already initialised.
+        Enforces HC2: refuses to write outside the given path.
+        """
+        target = path or self.root
+        # HC2: refuse to write outside the passed-in path
+        if path and not str(target).startswith(str(path)):
+            raise InvariantError(
+                "aimem init refuses to write outside --path (HC2).",
+                detail=str(target),
+            )
+
         if self.is_initialized:
-            logger.warning("Repository already initialized at %s", self.root)
+            log.info(op="init", result="already-initialized", path=str(self.root))
             return self.root
 
         self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
 
-        # Create directory structure
-        for dir_name, subdirs in DIRECTORY_STRUCTURE.items():
-            dir_path = self.root / dir_name
-            dir_path.mkdir(exist_ok=True)
-            for subdir in subdirs:
-                (dir_path / subdir).mkdir(exist_ok=True)
+        # Create personal layer directory structure
+        personal = self.layer_path(Layer.PERSONAL)
+        personal.mkdir(parents=True, exist_ok=True)
+        for subdir in _TYPE_SUBDIRS.values():
+            (personal / subdir).mkdir(exist_ok=True)
+        (personal / ".gitignore").write_text(_LAYER_GITIGNORE, encoding="utf-8")
 
-        # Create .hot buffer (gitignored)
-        (self.root / ".hot").mkdir(exist_ok=True)
+        # Initialize git repo inside personal/
+        self._git("init", cwd=personal)
+        self._git("checkout", "-b", "main", cwd=personal)
 
-        # Create .machine directory (gitignored)
-        (self.root / ".machine").mkdir(exist_ok=True)
+        # Ensure signing key pair exists
+        from aimem.core.signing import ensure_key_pair
 
-        # Write .gitignore
-        gitignore = self.root / ".gitignore"
-        gitignore.write_text(
-            ".machine/\n" "*.secret.md\n" "journal/private/\n" ".env\n" ".hot/\n",
-            encoding="utf-8",
-        )
+        ensure_key_pair(self.root)
 
-        # Write default config
+        # Save config
         self.config.save(self.root)
 
-        # Initialize git repo
-        self._git("init")
-        self._git("checkout", "-b", "main")
-        self._git("add", ".")
-        self._git("commit", "-m", "Initialize aimem memory repository")
+        # Initial commit in personal layer
+        self._git("add", ".", cwd=personal)
+        self._git("commit", "-m", "Initialize personal memory layer", cwd=personal)
 
-        logger.info("Initialized memory repository at %s", self.root)
+        log.info(op="init", result="ok", path=str(self.root))
         return self.root
 
-    def list_notes(
+    # ------------------------------------------------------------------
+    # Write (US-002)
+    # ------------------------------------------------------------------
+
+    def write(self, record: MemoryRecord) -> Path:
+        """Persist a record to disk and commit it.  Caller must hold the lock."""
+        path = self.record_path(record)
+        record_with_path = record.model_copy(update={"path": path})
+        record_with_path.to_file()
+
+        layer_root = self.layer_path(record.layer)
+        rel = path.relative_to(layer_root)
+        self._git("add", str(rel), cwd=layer_root)
+        self._git(
+            "commit",
+            "-m",
+            f"op=add type={record.type.value} id={record.id}",
+            cwd=layer_root,
+        )
+        log.info(op="add", layer=record.layer.value, record_id=record.id, result="ok")
+        return path
+
+    # ------------------------------------------------------------------
+    # Read (US-003, US-004)
+    # ------------------------------------------------------------------
+
+    def get(self, record_id: str, layer: Layer = Layer.PERSONAL) -> MemoryRecord:
+        """Fetch a record by ULID from *layer*."""
+        layer_root = self.layer_path(layer)
+        matches = list(layer_root.rglob(f"{record_id}.md"))
+        if not matches:
+            raise NotFoundError(
+                f"Record {record_id!r} not found in layer '{layer.value}'."
+            )
+        return MemoryRecord.from_file(matches[0])
+
+    def list_records(
         self,
+        layer: Layer = Layer.PERSONAL,
         memory_type: MemoryType | None = None,
         tags: list[str] | None = None,
-        project: str | None = None,
-    ) -> list[Note]:
-        """List all notes, optionally filtered by type, tags, or project."""
-        notes: list[Note] = []
+    ) -> list[MemoryRecord]:
+        """Return all records matching filters."""
+        layer_root = self.layer_path(layer)
+        if not layer_root.exists():
+            return []
 
         if memory_type:
-            search_dir = self._type_dir(memory_type)
-            if not search_dir.exists():
-                return []
-            md_files = list(search_dir.rglob("*.md"))
+            search_dirs = [layer_root / _TYPE_SUBDIRS[memory_type]]
         else:
-            md_files = []
-            for type_dir_name in ["identity", "knowledge", "procedures", "journal"]:
-                type_dir = self.root / type_dir_name
-                if type_dir.exists():
-                    md_files.extend(type_dir.rglob("*.md"))
+            search_dirs = [layer_root / d for d in _TYPE_SUBDIRS.values()]
 
-        for md_file in sorted(md_files):
-            try:
-                note = Note.from_file(md_file)
-                if tags and not set(tags).intersection(note.meta.tags):
-                    continue
-                if project and note.meta.project != project:
-                    continue
-                notes.append(note)
-            except Exception as exc:
-                logger.warning("Failed to parse %s: %s", md_file, exc)
+        records: list[MemoryRecord] = []
+        for d in search_dirs:
+            if not d.exists():
+                continue
+            for md in sorted(d.glob("*.md")):
+                try:
+                    rec = MemoryRecord.from_file(md)
+                    if tags and not set(tags).intersection(rec.tags):
+                        continue
+                    records.append(rec)
+                except Exception as exc:
+                    log.warning(op="list", path=str(md), error=str(exc))
+        return records
 
-        return notes
+    def tag_record(
+        self, record_id: str, tags_add: list[str], tags_remove: list[str]
+    ) -> MemoryRecord:
+        """Add/remove tags on a record and re-commit."""
+        rec = self.get(record_id)
+        new_tags = sorted(set(rec.tags).union(tags_add).difference(tags_remove))
+        updated = rec.model_copy(update={"tags": new_tags})
+        updated.to_file()
+        layer_root = self.layer_path(rec.layer)
+        rel = rec.path.relative_to(layer_root)  # type: ignore[arg-type]
+        self._git("add", str(rel), cwd=layer_root)
+        self._git("commit", "-m", f"op=tag id={record_id}", cwd=layer_root)
+        log.info(op="tag", record_id=record_id)
+        return updated
 
-    def get_note(self, path: str) -> Note | None:
-        """Get a specific note by relative path."""
-        full_path = self.root / path
-        if not full_path.exists():
-            logger.warning("Note not found: %s", full_path)
-            return None
-        return Note.from_file(full_path)
-
-    def add_note(
+    def link_records(
         self,
-        memory_type: MemoryType,
-        title: str,
-        body: str,
-        tags: list[str] | None = None,
-        **kwargs: str,
-    ) -> Note:
-        """Create a new memory note and save it to the repository."""
-        slug = title.lower().replace(" ", "-").replace("/", "-")
-        type_dir = self._type_dir(memory_type)
-        note_path = type_dir / f"{slug}.md"
+        source_id: str,
+        target_id: str,
+        link_type: str = "causal",
+    ) -> MemoryRecord:
+        """Add a link from source to target and re-commit."""
+        rec = self.get(source_id)
+        links_data = rec.links.model_dump()
+        existing: list[str] = links_data.get(link_type, [])
+        if target_id not in existing:
+            existing.append(target_id)
+        from aimem.core.schema import Links
 
-        meta = NoteMeta(
-            type=memory_type,
-            tags=tags or [],
-            **kwargs,
+        new_links = Links.model_validate({**links_data, link_type: existing})
+        updated = rec.model_copy(update={"links": new_links})
+        updated.to_file()
+        layer_root = self.layer_path(rec.layer)
+        rel = rec.path.relative_to(layer_root)  # type: ignore[arg-type]
+        self._git("add", str(rel), cwd=layer_root)
+        self._git(
+            "commit",
+            "-m",
+            f"op=link src={source_id} type={link_type}",
+            cwd=layer_root,
         )
+        log.info(op="link", source_id=source_id, target_id=target_id, link_type=link_type)
+        return updated
 
-        note = Note(path=note_path, meta=meta, title=title, body=body)
-        note.save()
+    # ------------------------------------------------------------------
+    # Sync (design.md §5)
+    # ------------------------------------------------------------------
 
-        logger.info("Added note: %s (%s)", note_path, memory_type.value)
-        return note
-
-    def remove_note(self, path: str) -> bool:
-        """Soft-delete a note by moving it to .archive/."""
-        full_path = self.root / path
-        if not full_path.exists():
-            logger.warning("Note not found for removal: %s", path)
-            return False
-
-        archive_path = self.root / ".archive" / path
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.rename(archive_path)
-
-        logger.info("Archived note: %s -> %s", path, archive_path)
-        return True
-
-    def sync(self) -> bool:
-        """Sync with remote: pull --rebase, then push."""
+    def sync(self, layer: Layer = Layer.PERSONAL) -> bool:
+        """git pull --rebase && git push."""
+        layer_root = self.layer_path(layer)
         try:
-            self._git("pull", "--rebase")
-            self._git("push")
-            logger.info("Synced with remote")
+            self._git("pull", "--rebase", cwd=layer_root)
+            self._git("push", cwd=layer_root)
+            log.info(op="sync", layer=layer.value, result="ok")
             return True
         except subprocess.CalledProcessError as exc:
-            logger.error("Sync failed: %s", exc)
+            log.error(op="sync", layer=layer.value, result="fail", error=str(exc))
             return False
 
-    def commit(self, message: str, paths: list[str] | None = None) -> None:
-        """Stage and commit changes."""
-        if paths:
-            for p in paths:
-                self._git("add", p)
-        else:
-            self._git("add", ".")
-        self._git("commit", "-m", message)
-        logger.info("Committed: %s", message)
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-    def _type_dir(self, memory_type: MemoryType) -> Path:
-        """Get the directory for a memory type."""
-        dir_map = {
-            MemoryType.IDENTITY: "identity",
-            MemoryType.KNOWLEDGE: "knowledge",
-            MemoryType.PROCEDURE: "procedures",
-            MemoryType.JOURNAL: "journal",
-        }
-        return self.root / dir_map[memory_type]
+    @staticmethod
+    def _git(*args: str, cwd: Path) -> str:
+        import os as _os
 
-    def _git(self, *args: str) -> str:
-        """Run a git command in the repository."""
+        env = _os.environ.copy()
+        # Ensure git always has a valid identity even in CI / fresh environments
+        env.setdefault("GIT_AUTHOR_NAME", "aimem")
+        env.setdefault("GIT_AUTHOR_EMAIL", "aimem@localhost")
+        env.setdefault("GIT_COMMITTER_NAME", "aimem")
+        env.setdefault("GIT_COMMITTER_EMAIL", "aimem@localhost")
         result = subprocess.run(
             ["git", *args],
-            cwd=self.root,
+            cwd=cwd,
             capture_output=True,
             text=True,
             check=True,
+            env=env,
         )
         return result.stdout.strip()

@@ -1,36 +1,56 @@
-"""aimem CLI — AI Agent Memory Manager.
+"""aimem CLI — AI Agent Memory Manager (design.md §5).
 
-Operator set informed by Autogenesis's 16-operator Context Manager API,
-adapted for memory-specific operations.
+Phase-1 commands: init, add, show, list, tag, link, query, sync, status,
+verify, layer (list/scope), serve (MCP).
+
+All commands accept ``--json`` for machine-readable output.
 """
 
 from __future__ import annotations
 
-import logging
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
-from aimem.core.config import DEFAULT_MEMORY_DIR
-from aimem.core.note import MemoryType
-from aimem.core.repository import MemoryRepository
-
-logger = logging.getLogger(__name__)
-
-
-def _setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+from aimem.core import logging as _logging
+from aimem.core.config import DEFAULT_MEMORY_DIR, AimemConfig
+from aimem.core.error import AimemError
+from aimem.core.repository import LayerRepo
+from aimem.core.schema import Layer, MemoryType
 
 
-def _get_repo(memory_dir: str | None) -> MemoryRepository:
-    root = Path(memory_dir) if memory_dir else DEFAULT_MEMORY_DIR
-    return MemoryRepository(root=root)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _out(data: Any, *, as_json: bool) -> None:
+    if as_json:
+        click.echo(json.dumps(data, default=str, indent=2))
+    elif isinstance(data, str):
+        click.echo(data)
+    else:
+        click.echo(str(data))
+
+
+def _err(msg: str, *, as_json: bool, kind: str = "error") -> None:
+    if as_json:
+        click.echo(json.dumps({"error": {"kind": kind, "message": msg}}), err=True)
+    else:
+        click.echo(f"Error ({kind}): {msg}", err=True)
+
+
+def _get_memory_dir(ctx: click.Context) -> Path:
+    raw = ctx.obj.get("memory_dir")
+    return Path(raw) if raw else DEFAULT_MEMORY_DIR
+
+
+# ---------------------------------------------------------------------------
+# Root group
+# ---------------------------------------------------------------------------
 
 
 @click.group()
@@ -41,207 +61,425 @@ def _get_repo(memory_dir: str | None) -> MemoryRepository:
     help=f"Memory repository path (default: {DEFAULT_MEMORY_DIR})",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
+@click.option("--json", "as_json", is_flag=True, help="Emit structured JSON output")
 @click.pass_context
-def cli(ctx: click.Context, memory_dir: str | None, verbose: bool) -> None:
-    """aimem — AI Agent Memory Manager.
-
-    Git-based persistent memory for local AI coding agents.
-    """
-    _setup_logging(verbose)
+def cli(ctx: click.Context, memory_dir: str | None, verbose: bool, as_json: bool) -> None:
+    """aimem — git-backed persistent memory for local AI coding agents."""
+    _logging.configure(verbose=verbose)
     ctx.ensure_object(dict)
     ctx.obj["memory_dir"] = memory_dir
+    ctx.obj["as_json"] = as_json
+
+
+# ---------------------------------------------------------------------------
+# aimem init
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
+@click.option("--path", "override_path", default=None, help="Init at this path instead of default")
 @click.pass_context
-def init(ctx: click.Context) -> None:
+def init(ctx: click.Context, override_path: str | None) -> None:
     """Initialize a new memory repository at ~/.ai-memory/."""
-    repo = _get_repo(ctx.obj["memory_dir"])
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = Path(override_path) if override_path else _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+
     if repo.is_initialized:
-        click.echo(f"Repository already exists at {repo.root}")
+        msg = f"Already initialized at {memory_dir}"
+        _out({"result": "already-initialized", "path": str(memory_dir)} if as_json else msg, as_json=as_json)
+        return
+
+    try:
+        path = repo.init(memory_dir)
+        _out(
+            {"result": "ok", "path": str(path)} if as_json else f"Initialized memory repository at {path}",
+            as_json=as_json,
+        )
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
         sys.exit(1)
 
-    path = repo.init()
-    click.echo(f"Initialized memory repository at {path}")
-    click.echo("Directory structure created:")
-    click.echo("  identity/       — core persistent facts (Tier 1)")
-    click.echo("  knowledge/      — domain facts, project conventions (Tier 2-3)")
-    click.echo("  procedures/     — how-to recipes, workflows (Tier 2-3)")
-    click.echo("  journal/        — episode logs, decisions (Tier 3)")
+
+# ---------------------------------------------------------------------------
+# aimem add
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
-@click.argument("memory_type", type=click.Choice([t.value for t in MemoryType]))
-@click.argument("title")
-@click.option("--body", "-b", default="", help="Note body content")
-@click.option("--tags", "-t", multiple=True, help="Tags for the note")
-@click.option("--summary", "-s", default="", help="One-line summary for retrieval")
-@click.option("--project", "-p", default=None, help="Project scope")
-@click.option("--commit/--no-commit", default=True, help="Auto-commit after adding")
+@click.option("--type", "memory_type", required=True, type=click.Choice([t.value for t in MemoryType]), help="Memory type")
+@click.option("--title", required=True, help="Note title")
+@click.option("--body", "-b", default="", help="Note body (Markdown)")
+@click.option("--tag", "-t", multiple=True, help="Tag (repeatable)")
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]), help="Target layer")
+@click.option("--agent", default="cli", help="Agent name for provenance")
+@click.option("--session", default="", help="Session ID for provenance")
 @click.pass_context
 def add(
     ctx: click.Context,
     memory_type: str,
     title: str,
     body: str,
-    tags: tuple[str, ...],
-    summary: str,
-    project: str | None,
-    commit: bool,
+    tag: tuple[str, ...],
+    layer_str: str,
+    agent: str,
+    session: str,
 ) -> None:
-    """Create a new memory note."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    if not repo.is_initialized:
-        click.echo("Error: repository not initialized. Run 'aimem init' first.")
+    """Add a new memory note."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+
+    from aimem.core.services.add import add_note
+
+    try:
+        record = add_note(
+            memory_dir=memory_dir,
+            layer=Layer(layer_str),
+            memory_type=MemoryType(memory_type),
+            title=title,
+            body=body,
+            tags=list(tag),
+            agent=agent,
+            session=session,
+        )
+        _out(
+            record.model_dump(mode="json", exclude={"body", "path"}) if as_json
+            else f"Created: {record.id} ({record.type.value}: {record.title})",
+            as_json=as_json,
+        )
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
         sys.exit(1)
 
-    kwargs: dict[str, str] = {}
-    if summary:
-        kwargs["summary"] = summary
-    if project:
-        kwargs["project"] = project
 
-    note = repo.add_note(
-        memory_type=MemoryType(memory_type),
-        title=title,
-        body=body,
-        tags=list(tags),
-        **kwargs,
-    )
-
-    if commit:
-        rel_path = note.path.relative_to(repo.root)
-        repo.commit(f"Add {memory_type}: {title}", paths=[str(rel_path)])
-
-    click.echo(f"Created: {note.path.relative_to(repo.root)}")
+# ---------------------------------------------------------------------------
+# aimem show
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
-@click.argument("path")
+@click.argument("record_id")
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
 @click.pass_context
-def get(ctx: click.Context, path: str) -> None:
-    """Read a specific memory note by path."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    note = repo.get_note(path)
-    if not note:
-        click.echo(f"Note not found: {path}")
+def show(ctx: click.Context, record_id: str, layer_str: str) -> None:
+    """Show a record by ID."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+
+    from aimem.core.error import NotFoundError
+
+    try:
+        rec = repo.get(record_id, Layer(layer_str))
+        if as_json:
+            d = rec.model_dump(mode="json")
+            d["body"] = rec.body
+            _out(d, as_json=True)
+        else:
+            click.echo(f"ID:      {rec.id}")
+            click.echo(f"Type:    {rec.type.value}")
+            click.echo(f"Layer:   {rec.layer.value}")
+            click.echo(f"Title:   {rec.title}")
+            click.echo(f"Tags:    {', '.join(rec.tags)}")
+            click.echo(f"Created: {rec.created_at}")
+            click.echo(f"Updated: {rec.updated_at}")
+            click.echo("---")
+            click.echo(rec.body)
+    except NotFoundError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
+        sys.exit(4)
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
         sys.exit(1)
 
-    click.echo(f"# {note.title}")
-    click.echo(f"Type: {note.meta.type.value}")
-    click.echo(f"Tags: {', '.join(note.meta.tags)}")
-    click.echo(f"Confidence: {note.meta.confidence.value}")
-    click.echo(f"Updated: {note.meta.updated}")
-    if note.meta.summary:
-        click.echo(f"Summary: {note.meta.summary}")
-    click.echo("---")
-    click.echo(note.body)
+
+# ---------------------------------------------------------------------------
+# aimem list
+# ---------------------------------------------------------------------------
 
 
 @cli.command("list")
-@click.option(
-    "--type",
-    "memory_type",
-    type=click.Choice([t.value for t in MemoryType]),
-    default=None,
-    help="Filter by memory type",
-)
-@click.option("--tags", "-t", multiple=True, help="Filter by tags")
-@click.option("--project", "-p", default=None, help="Filter by project")
+@click.option("--type", "memory_type", default=None, type=click.Choice([t.value for t in MemoryType]))
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
+@click.option("--tag", "-t", multiple=True, help="Filter by tag (repeatable)")
 @click.pass_context
-def list_notes(
-    ctx: click.Context,
-    memory_type: str | None,
-    tags: tuple[str, ...],
-    project: str | None,
-) -> None:
-    """List memory notes, optionally filtered."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    if not repo.is_initialized:
-        click.echo("Error: repository not initialized. Run 'aimem init' first.")
+def list_notes(ctx: click.Context, memory_type: str | None, layer_str: str, tag: tuple[str, ...]) -> None:
+    """List memory records."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    mt = MemoryType(memory_type) if memory_type else None
+    records = repo.list_records(layer=Layer(layer_str), memory_type=mt, tags=list(tag) if tag else None)
+
+    if as_json:
+        _out([{"id": r.id, "type": r.type.value, "title": r.title, "updated_at": r.updated_at, "tags": r.tags} for r in records], as_json=True)
+    else:
+        if not records:
+            click.echo("No records found.")
+            return
+        for r in records:
+            tag_str = ", ".join(r.tags[:3])
+            click.echo(f"  {r.id}  [{r.type.value}]  {r.title}  ({tag_str})")
+        click.echo(f"\n{len(records)} record(s)")
+
+
+# ---------------------------------------------------------------------------
+# aimem tag
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def tag() -> None:
+    """Manage record tags."""
+
+
+@tag.command("add")
+@click.argument("record_id")
+@click.argument("tags", nargs=-1, required=True)
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
+@click.pass_context
+def tag_add(ctx: click.Context, record_id: str, tags: tuple[str, ...], layer_str: str) -> None:
+    """Add tags to a record."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    try:
+        updated = repo.tag_record(record_id, list(tags), [])
+        _out({"id": record_id, "tags": updated.tags} if as_json else f"Tags updated: {updated.tags}", as_json=as_json)
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
         sys.exit(1)
 
-    mt = MemoryType(memory_type) if memory_type else None
-    notes = repo.list_notes(
-        memory_type=mt,
-        tags=list(tags) if tags else None,
-        project=project,
-    )
 
-    if not notes:
-        click.echo("No notes found.")
-        return
+@tag.command("rm")
+@click.argument("record_id")
+@click.argument("tags", nargs=-1, required=True)
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
+@click.pass_context
+def tag_rm(ctx: click.Context, record_id: str, tags: tuple[str, ...], layer_str: str) -> None:
+    """Remove tags from a record."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    try:
+        updated = repo.tag_record(record_id, [], list(tags))
+        _out({"id": record_id, "tags": updated.tags} if as_json else f"Tags updated: {updated.tags}", as_json=as_json)
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
+        sys.exit(1)
 
-    for note in notes:
-        rel = note.path.relative_to(repo.root)
-        tag_str = ", ".join(note.meta.tags[:3])
-        click.echo(f"  {rel}  [{note.meta.type.value}]  ({tag_str})")
 
-    click.echo(f"\n{len(notes)} note(s)")
+# ---------------------------------------------------------------------------
+# aimem link
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
-@click.argument("path")
-@click.option("--commit/--no-commit", default=True, help="Auto-commit after removing")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option("--type", "link_type", default="causal", type=click.Choice(["causal", "evolves", "refines"]))
 @click.pass_context
-def remove(ctx: click.Context, path: str, commit: bool) -> None:
-    """Soft-delete a memory note (move to .archive/)."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    if repo.remove_note(path):
-        if commit:
-            repo.commit(f"Archive: {path}")
-        click.echo(f"Archived: {path}")
-    else:
-        click.echo(f"Note not found: {path}")
+def link(ctx: click.Context, source_id: str, target_id: str, link_type: str) -> None:
+    """Create a link between two records."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    try:
+        repo.link_records(source_id, target_id, link_type)
+        _out(
+            {"source": source_id, "target": target_id, "link_type": link_type} if as_json
+            else f"Linked {source_id} --{link_type}--> {target_id}",
+            as_json=as_json,
+        )
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# aimem query
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("query_text")
+@click.option("--top-k", default=None, type=int, help="Max results (default: retrieval_window from config)")
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
+@click.option("--type", "memory_type", default=None, type=click.Choice([t.value for t in MemoryType]))
+@click.option("--tag", "-t", multiple=True)
+@click.pass_context
+def query(
+    ctx: click.Context,
+    query_text: str,
+    top_k: int | None,
+    layer_str: str,
+    memory_type: str | None,
+    tag: tuple[str, ...],
+) -> None:
+    """Search memory notes (hybrid BM25 + embedding)."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+
+    from aimem.core.services.query import query as do_query
+
+    try:
+        results = do_query(
+            memory_dir=memory_dir,
+            q=query_text,
+            top_k=top_k,
+            layer=Layer(layer_str),
+            memory_type=MemoryType(memory_type) if memory_type else None,
+            tags=list(tag) if tag else None,
+        )
+        if as_json:
+            _out(
+                [{"rank": r.rank, "score": r.score, "id": r.record.id, "title": r.record.title, "type": r.record.type.value, "tags": r.record.tags} for r in results],
+                as_json=True,
+            )
+        else:
+            if not results:
+                click.echo("No results found.")
+                return
+            for r in results:
+                click.echo(f"  [{r.rank}] {r.score:.3f}  {r.record.id}  {r.record.title}")
+    except AimemError as exc:
+        _err(exc.message, as_json=as_json, kind=exc.kind)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# aimem verify
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--strict", is_flag=True, help="Also verify ed25519 signatures")
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
+@click.pass_context
+def verify(ctx: click.Context, strict: bool, layer_str: str) -> None:
+    """Verify schema, signatures, and link integrity."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+
+    from aimem.core.services.verify import verify as do_verify
+
+    report = do_verify(memory_dir=memory_dir, layer=Layer(layer_str), strict=strict)
+    if as_json:
+        _out(report.as_dict(), as_json=True)
+    else:
+        if report.ok:
+            click.echo("Verify: OK")
+        else:
+            click.echo(f"Verify: FAIL ({len(report.findings)} finding(s))")
+            for f in report.findings:
+                click.echo(f"  [{f.kind}] {f.record_id}: {f.message}")
+    if not report.ok:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# aimem status
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show memory repository status."""
-    repo = _get_repo(ctx.obj["memory_dir"])
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+
     if not repo.is_initialized:
-        click.echo("Not initialized. Run 'aimem init' first.")
+        _err("Not initialized. Run 'aimem init' first.", as_json=as_json, kind="config")
         sys.exit(1)
 
     counts: dict[str, int] = {}
     for mt in MemoryType:
-        notes = repo.list_notes(memory_type=mt)
-        counts[mt.value] = len(notes)
-
+        counts[mt.value] = len(repo.list_records(memory_type=mt))
     total = sum(counts.values())
-    click.echo(f"Memory repository: {repo.root}")
-    click.echo(f"Total notes: {total}")
-    for type_name, count in counts.items():
-        click.echo(f"  {type_name}: {count}")
+
+    if as_json:
+        _out({"path": str(memory_dir), "total": total, "by_type": counts}, as_json=True)
+    else:
+        click.echo(f"Memory repository: {memory_dir}")
+        click.echo(f"Total records: {total}")
+        for type_name, count in counts.items():
+            click.echo(f"  {type_name}: {count}")
+
+
+# ---------------------------------------------------------------------------
+# aimem sync
+# ---------------------------------------------------------------------------
 
 
 @cli.command()
+@click.option("--layer", "layer_str", default="personal", type=click.Choice([l.value for l in Layer]))
 @click.pass_context
-def sync(ctx: click.Context) -> None:
-    """Sync with remote (git pull --rebase && git push)."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    if repo.sync():
-        click.echo("Synced successfully.")
+def sync(ctx: click.Context, layer_str: str) -> None:
+    """Sync a layer with its remote (git pull --rebase && git push)."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    ok = repo.sync(Layer(layer_str))
+    if ok:
+        _out({"result": "ok", "layer": layer_str} if as_json else "Synced successfully.", as_json=as_json)
     else:
-        click.echo("Sync failed. Check git status.")
+        _err("Sync failed. Check git status.", as_json=as_json, kind="transient")
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# aimem layer (sub-group)
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def layer() -> None:
+    """Manage memory layers."""
+
+
+@layer.command("list")
+@click.pass_context
+def layer_list(ctx: click.Context) -> None:
+    """List available layers."""
+    as_json: bool = ctx.obj["as_json"]
+    memory_dir = _get_memory_dir(ctx)
+    repo = LayerRepo(memory_dir)
+    layers = []
+    for lyr in Layer:
+        lpath = repo.layer_path(lyr)
+        layers.append({"layer": lyr.value, "path": str(lpath), "exists": lpath.exists()})
+    if as_json:
+        _out(layers, as_json=True)
+    else:
+        for info in layers:
+            status_str = "active" if info["exists"] else "not initialized"
+            click.echo(f"  {info['layer']:<12} {info['path']}  [{status_str}]")
+
+
+@layer.command("scope")
+@click.argument("layer_name", type=click.Choice([l.value for l in Layer]))
+@click.pass_context
+def layer_scope(ctx: click.Context, layer_name: str) -> None:
+    """Set the active layer for this session (informational — Phase 1)."""
+    as_json: bool = ctx.obj["as_json"]
+    _out(
+        {"active_layer": layer_name} if as_json else f"Active layer: {layer_name} (session scope)",
+        as_json=as_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# aimem serve (MCP server)
+# ---------------------------------------------------------------------------
+
+
 @cli.command()
 @click.pass_context
-def validate(ctx: click.Context) -> None:
-    """Check all notes for valid frontmatter."""
-    repo = _get_repo(ctx.obj["memory_dir"])
-    notes = repo.list_notes()
-    errors = 0
+def serve(ctx: click.Context) -> None:
+    """Start the MCP server (stdio transport)."""
+    memory_dir = _get_memory_dir(ctx)
+    from aimem.mcp.server import run_server
 
-    for note in notes:
-        rel = note.path.relative_to(repo.root)
-        if not note.meta.summary:
-            click.echo(f"  WARN: {rel} — missing summary field")
-        if not note.meta.tags:
-            click.echo(f"  WARN: {rel} — no tags")
-
-    click.echo(f"\nValidated {len(notes)} note(s), {errors} error(s)")
+    run_server(memory_dir=memory_dir)

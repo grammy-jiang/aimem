@@ -1,0 +1,46 @@
+{
+  "_comment": "Claude Code hook configuration for aimem. Copy to ~/.claude/settings.json or merge into your existing settings. All hooks run with AIMEM_CALLER_ROLE=hook (untrusted layer).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AIMEM_CALLER_ROLE=hook aimem query --json \"project goals and constraints\" --top-k 5 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AIMEM_CALLER_ROLE=hook aimem query --json \"$(echo $CLAUDE_USER_PROMPT | head -c 200)\" --top-k 3 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Create",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AIMEM_CALLER_ROLE=hook aimem add --type observation --title 'File edited in session' --body \"$CLAUDE_TOOL_RESULT\" --tag 'claude-code' --tag 'auto' 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AIMEM_CALLER_ROLE=hook aimem sync 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}
