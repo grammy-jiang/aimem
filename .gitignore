@@ -34,3 +34,9 @@ Thumbs.db
 
 # uv
 .python-version
+
+# local-agent-harness
+.agent/logs/
+.env.*
+*.pem
+*.key

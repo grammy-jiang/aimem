@@ -1,0 +1,30 @@
+name: verify
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup language toolchain
+        run: |
+          echo "TODO - configure for this repo"
+      - name: Lint / format
+        run: |
+          echo "TODO - run linter"
+      - name: Unit tests
+        run: |
+          echo "TODO - run tests"
+      - name: Secrets scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+      - name: Manifest regression
+        run: |
+          if command -v local-agent-harness >/dev/null 2>&1; then
+            local-agent-harness validate --repo .
+          fi
