@@ -10,7 +10,7 @@ Source: req-clarifier
 The atomic memory unit. A YAML frontmatter + Markdown body file stored in the git repository.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | path | Path | Yes | Must be within repo root; relative to memory_dir | Derived from type directory + slugified title |
 | meta | NoteMeta (E-002) | Yes | Must validate against Pydantic model | YAML frontmatter section |
 | title | string | Yes | Extracted from first `# Heading` line | Display name |
@@ -21,7 +21,7 @@ The atomic memory unit. A YAML frontmatter + Markdown body file stored in the gi
 YAML frontmatter metadata for a memory note. Validated by Pydantic BaseModel.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | type | MemoryType enum | Yes | One of: identity, knowledge, procedure, journal | Determines directory and tier behavior |
 | tags | list[str] | Yes (default: []) | Lowercase, no spaces within tags | Used for filtering and Jaccard dedup |
 | updated | date | Yes (default: today) | ISO 8601 date (YYYY-MM-DD) | Auto-set on write |
@@ -46,7 +46,7 @@ YAML frontmatter metadata for a memory note. Validated by Pydantic BaseModel.
 Auto-generated `.links/graph.yaml` mapping note relationships.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | nodes | dict[str, NodeEntry] | Yes | Keyed by relative note path | Top-level structure |
 | nodes[path].outgoing | list[str] | Yes (default: []) | Valid relative paths | Notes this note links to |
 | nodes[path].incoming | list[str] | Yes (default: []) | Valid relative paths | Notes that link to this note |
@@ -58,7 +58,7 @@ Auto-generated `.links/graph.yaml` mapping note relationships.
 `.aimem.yaml` configuration file at repository root.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | memory_dir | Path | No (default: ~/.ai-memory) | Valid directory path | Override via CLI --memory-dir or AIMEM_DIR |
 | context_budget | ContextBudget | No (defaults apply) | All values positive integers | Token allocation per tier |
 | context_budget.total_max_tokens | int | No (default: 5000) | > 0 | Hard ceiling for context injection |
@@ -83,7 +83,7 @@ Auto-generated `.links/graph.yaml` mapping note relationships.
 Staged note in `.hot/` directory awaiting probation before promotion.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | note | Note (E-001) | Yes | Valid Note instance | The staged memory note |
 | staged_at | datetime | Yes | ISO 8601 with timezone | When the note entered hot buffer |
 | session_count | int | Yes (default: 0) | >= 0 | Sessions since staging |
@@ -94,7 +94,7 @@ Staged note in `.hot/` directory awaiting probation before promotion.
 BM25 + embedding index for hybrid retrieval.
 
 | Field | Type | Required | Constraints | Notes |
-|-------|------|----------|-------------|-------|
+| ------- | ------ | ---------- | ------------- | ------- |
 | bm25_index | object | Yes | Built from all active note content + tags | Sparse retrieval component |
 | embedding_index | object | Yes | Built from note summaries + bodies | Dense retrieval component |
 | last_built | datetime | Yes | ISO 8601 | For stale index detection in doctor |
@@ -103,7 +103,7 @@ BM25 + embedding index for hybrid retrieval.
 ## Data Ownership & Integration Sources
 
 | Entity ID | Entity Name | Source of Truth | Integration | Related ReqIDs |
-|-----------|-------------|----------------|-------------|----------------|
+| ----------- | ------------- | ---------------- | ------------- | ---------------- |
 | E-001 | Note | Git repository (filesystem + git history) | INT-001 (Git) | R-002, R-003, R-004, R-005 |
 | E-002 | NoteMeta | YAML frontmatter in E-001 files | None (embedded in E-001) | R-004 |
 | E-003 | LinkGraph | Auto-generated from E-001 links fields | None (derived) | R-014 |
@@ -114,7 +114,7 @@ BM25 + embedding index for hybrid retrieval.
 ## Privacy & Retention
 
 | Policy | Details | Related ReqIDs |
-|--------|---------|----------------|
+| -------- | --------- | ---------------- |
 | Secrets exclusion | `.machine/`, `*.secret.md`, `journal/private/`, `.env` are gitignored and never committed | R-001, R-005 |
 | Git history retention | All committed data retained permanently in git history; soft-deleted notes preserved in .archive/ | R-002, R-005 |
 | Hot buffer retention | Transient; .hot/ is gitignored and entries are either promoted or discarded | R-017 |

@@ -6,7 +6,7 @@ Source: req-clarifier
 ## Status Legend
 
 | Status | Meaning |
-|--------|---------|
+| -------- | --------- |
 | `Proposed` | Initial capture, not yet validated |
 | `Active` | Confirmed in-scope for this release |
 | `Deferred` | Confirmed but postponed to future release |
@@ -15,7 +15,7 @@ Source: req-clarifier
 ## Must-Have Requirements
 
 | ReqID | Title | Description | Value/Rationale | Dependencies | Status |
-|-------|-------|-------------|-----------------|--------------|--------|
+| ------- | ------- | ------------- | ----------------- | -------------- | -------- |
 | R-001 | Repository Initialization | `aimem init` creates a git-backed memory repository at a configurable path (default `~/.ai-memory/`) with the standard directory structure (identity/, knowledge/, procedures/, journal/, .hot/, .archive/, .machine/, .links/) and default `.aimem.yaml` config. | Provides the foundational storage layer; nothing works without an initialized repo. | None | Active |
 | R-002 | Note CRUD Operations | Users can create (`aimem add`), read (`aimem get`), update (`aimem update`), list (`aimem list`), and soft-delete (`aimem remove`) memory notes. Notes use YAML frontmatter + Markdown body format. | Core data management capability; the fundamental interaction model. | R-001 | Active |
 | R-003 | Memory Type System | Notes are classified into four types: identity, knowledge, procedure, journal. Each type maps to a directory and has type-specific behavior for tiering, forgetting policy weights, and context injection. | Differentiates memory by usage pattern (MIRIX-inspired), enabling type-aware retrieval and lifecycle management. | R-002 | Active |
@@ -47,7 +47,7 @@ Source: req-clarifier
 ## Nice-to-Have Requirements
 
 | ReqID | Title | Description | Value/Rationale | Dependencies | Status |
-|-------|-------|-------------|-----------------|--------------|--------|
+| ------- | ------- | ------------- | ----------------- | -------------- | -------- |
 | R-028 | Agent Export - Cursor | `aimem export cursor` generates `.cursorrules` or `.cursor/rules/` files. | Extends to Cursor users. | R-002, R-003 | Proposed |
 | R-029 | Export Watch Mode | `aimem export --watch --all` watches for memory changes and auto-regenerates agent configs. | Reduces manual export friction. | R-007, R-008 | Proposed |
 | R-030 | Terminal Screen Reader Compatibility | CLI output should be compatible with terminal screen readers (no excessive ANSI codes, proper text structure). | Accessibility for visually impaired developers. | R-009 | Proposed |
@@ -58,7 +58,7 @@ Source: req-clarifier
 ## Out-of-Scope / Won't-Have (CRITICAL for preventing scope drift)
 
 | Item | Reason for Exclusion | Related ReqIDs | Requested By |
-|------|---------------------|----------------|--------------|
+| ------ | --------------------- | ---------------- | -------------- |
 | GUI / Web Interface | CLI-only tool; agents interact via MCP, humans via terminal | R-009, R-010 | Stakeholder (Round 4) |
 | Cloud Service / SaaS | Local-first architecture; sharing via git remotes only | R-005 | Stakeholder (Round 4) |
 | Mobile Application | Desktop/server CLI tool only | R-009 | Stakeholder (Round 4) |
@@ -75,14 +75,14 @@ Source: req-clarifier
 ### Personas
 
 | ID | Name | Description |
-|----|------|-------------|
+| ---- | ------ | ------------- |
 | P-001 | Solo Developer | Individual developer using one or more AI coding agents locally. Manages personal preferences, project knowledge, and session history. Moderate-to-high technical proficiency. |
 | P-002 | Team Lead | Developer who maintains shared team conventions and reviews memory contributions via PRs. High technical proficiency. Concerned with consistency and onboarding. |
 
 ### Workflows
 
 | ID | Name | Description | Primary Persona |
-|----|------|-------------|-----------------|
+| ---- | ------ | ------------- | ----------------- |
 | WF-001 | Repository Setup | Initialize memory repo, configure adapters, set token budgets, import existing configs. | P-001 |
 | WF-002 | Note Lifecycle | Create, read, update, search, soft-delete, and evolve memory notes through CLI or MCP. | P-001 |
 | WF-003 | Context Injection | Agent retrieves relevant memories during a coding session via MCP or exported config files. | P-001 |
@@ -93,7 +93,7 @@ Source: req-clarifier
 ### Integrations
 
 | ID | Name | Type | Description |
-|----|------|------|-------------|
+| ---- | ------ | ------ | ------------- |
 | INT-001 | Git | Local + Remote | Version control backend for storage, history, sharing, provenance, and atomic writes. |
 | INT-002 | MCP Protocol | API | Model Context Protocol for direct agent-to-memory communication. |
 | INT-003 | Embedding Model | Library | Local embedding model for semantic search and dedup (e.g., sentence-transformers). |
@@ -101,7 +101,7 @@ Source: req-clarifier
 ### Roles
 
 | ID | Name | Description |
-|----|------|-------------|
+| ---- | ------ | ------------- |
 | ROLE-001 | Repository Owner | Full control over the memory repository: all CRUD, config, prune, doctor, sync, export. |
 | ROLE-002 | Team Contributor | Can propose memory additions via PR to team repos. Cannot directly push to main or prune. |
 | ROLE-003 | Agent (MCP Client) | Automated consumer: can search, read, add (to hot buffer), and list notes via MCP tools. Cannot prune, configure, or directly commit. |
@@ -109,7 +109,7 @@ Source: req-clarifier
 ### Data Entities
 
 | ID | Name | Description | Source |
-|----|------|-------------|--------|
+| ---- | ------ | ------------- | -------- |
 | E-001 | Note | Atomic memory unit: YAML frontmatter metadata + Markdown body, stored as a file in the git repository. | Core domain |
 | E-002 | NoteMeta | YAML frontmatter fields: type, tags, updated, summary, confidence, links, supersedes, project, agent, machine, date, caused_by, causes, observation_count, first_observed, last_observed, importance, access_count. | Core domain |
 | E-003 | LinkGraph | Auto-generated `.links/graph.yaml` mapping each note to outgoing, incoming, and causal links plus aggregated tags. | Derived from E-001 |

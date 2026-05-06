@@ -6,7 +6,7 @@ Source: req-clarifier
 ## TestLevel Legend
 
 | Tag | Meaning | When to Use |
-|-----|---------|-------------|
+| ----- | --------- | ------------- |
 | `[Unit]` | Unit test | Pure logic, no external dependencies |
 | `[Integration]` | Integration test | Database, API, external service interaction |
 | `[E2E]` | End-to-end test | Full user flow through UI |

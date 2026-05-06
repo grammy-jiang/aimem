@@ -6,7 +6,7 @@ Source: req-clarifier
 ## Roles
 
 | Role ID | Role Name | Description |
-|---------|-----------|-------------|
+| --------- | ----------- | ------------- |
 | ROLE-001 | Repository Owner | Full control over the memory repository. Manages configuration, performs maintenance, and has all CRUD and lifecycle capabilities. Typically the solo developer or team lead. |
 | ROLE-002 | Team Contributor | Can propose memory additions to team repositories via pull requests. Cannot directly push to main, prune, or modify configuration. |
 | ROLE-003 | Agent (MCP Client) | Automated consumer that interacts via MCP protocol. Can search, read, add (to hot buffer), and list notes. Cannot prune, configure, doctor, or directly commit to permanent storage. |
@@ -14,7 +14,7 @@ Source: req-clarifier
 ## Permission Matrix
 
 | Capability | ROLE-001 (Repository Owner) | ROLE-002 (Team Contributor) | ROLE-003 (Agent/MCP Client) | Related Reqs |
-|------------|---------------------------|---------------------------|---------------------------|--------------|
+| ------------ | --------------------------- | --------------------------- | --------------------------- | -------------- |
 | `aimem init` | Yes | No | No | R-001 |
 | `aimem add` (direct commit) | Yes | Via PR only | Hot buffer only | R-002, R-017 |
 | `aimem get` | Yes | Yes (own fork) | Yes | R-002 |
@@ -41,7 +41,7 @@ Source: req-clarifier
 ### Auditable Actions
 
 | Action | Must Log | Retention | Related ReqIDs | Compliance Driver |
-|--------|----------|-----------|----------------|-------------------|
+| -------- | ---------- | ----------- | ---------------- | ------------------- |
 | Note creation | Yes | Git history (permanent) | R-002, R-005 | Data provenance |
 | Note update | Yes | Git history (permanent) | R-002, R-005 | Change tracking |
 | Note removal (archive) | Yes | Git history (permanent) | R-002, R-005 | Data provenance |
@@ -56,7 +56,7 @@ Source: req-clarifier
 ### Audit Log Contents
 
 | Field | Required | Description |
-|-------|----------|-------------|
+| ------- | ---------- | ------------- |
 | Timestamp | Yes | ISO 8601 format with timezone |
 | Actor | Yes | User ID (from git config) or "mcp-agent" for automated actions |
 | Action | Yes | What was done (add, update, remove, prune, consolidate, etc.) |
@@ -69,7 +69,7 @@ Source: req-clarifier
 ### Access to Audit Logs
 
 | Role ID | Role Name | Can View | Can Export | Can Delete |
-|---------|-----------|----------|------------|------------|
+| --------- | ----------- | ---------- | ------------ | ------------ |
 | ROLE-001 | Repository Owner | Yes (git log, JSONL logs) | Yes | No (immutable git history) |
 | ROLE-002 | Team Contributor | Yes (own fork git log) | Yes (own fork) | No |
 | ROLE-003 | Agent (MCP Client) | Yes (memory_status only) | No | No |

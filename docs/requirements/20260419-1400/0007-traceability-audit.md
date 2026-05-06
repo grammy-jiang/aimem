@@ -40,7 +40,7 @@ All referenced entities have E-XXX IDs in the data dictionary.
 ## Audit Summary
 
 | Check | Status | Orphan Count |
-|-------|--------|--------------|
+| ------- | -------- | -------------- |
 | All R-XXX have >= 1 P-XXX mapping | Pass | 0 |
 | All R-XXX have >= 1 WF-XXX mapping | Pass | 0 |
 | All WF-XXX map to >= 1 R-XXX | Pass | 0 |
