@@ -1,0 +1,134 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write  # needed to create GitHub Releases
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # 1. Run full verify suite first                                       #
+  # ------------------------------------------------------------------ #
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: pyproject.toml
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Unit tests
+        run: uv run pytest tests/unit/ -q --tb=short
+
+  # ------------------------------------------------------------------ #
+  # 2. Build sdist + wheel                                               #
+  # ------------------------------------------------------------------ #
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: pyproject.toml
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ------------------------------------------------------------------ #
+  # 3. Create GitHub Release with changelog from tag annotation          #
+  # ------------------------------------------------------------------ #
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed to get full tag annotation
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract tag annotation as release notes
+        id: notes
+        run: |
+          # Use annotated tag message if available; fallback to commits since last tag
+          TAG="${GITHUB_REF_NAME}"
+          NOTES=$(git tag -l --format='%(contents)' "$TAG" 2>/dev/null | head -200)
+          if [ -z "$NOTES" ]; then
+            PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$PREV" ]; then
+              NOTES=$(git log --no-merges --pretty=format:'- %s' "${PREV}..HEAD")
+            else
+              NOTES=$(git log --no-merges --pretty=format:'- %s' HEAD)
+            fi
+          fi
+          # Write to file to preserve newlines
+          echo "$NOTES" > /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release-notes.md
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # v1.0.0-beta → pre-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------ #
+  # 4. Publish to PyPI (optional — activate by adding PYPI_API_TOKEN)   #
+  # ------------------------------------------------------------------ #
+  pypi-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish when PYPI_API_TOKEN secret is configured
+    if: ${{ vars.PUBLISH_TO_PYPI == 'true' }}
+    environment:
+      name: pypi
+      url: https://pypi.org/project/aimem/
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Publish to PyPI
+        run: uv publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
